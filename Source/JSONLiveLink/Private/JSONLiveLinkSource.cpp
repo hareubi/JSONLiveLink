@@ -1,5 +1,7 @@
 // Copyright 1998-2018 Epic Games, Inc. All Rights Reserved.
 
+// Copyright 1998-2018 Epic Games, Inc. All Rights Reserved.
+
 #include "JSONLiveLinkSource.h"
 
 #include "ILiveLinkClient.h"
@@ -19,10 +21,10 @@
 #define RECV_BUFFER_SIZE 1024 * 1024
 
 FJSONLiveLinkSource::FJSONLiveLinkSource(FIPv4Endpoint InEndpoint)
-: Socket(nullptr)
-, Stopping(false)
-, Thread(nullptr)
-, WaitTime(FTimespan::FromMilliseconds(100))
+	: Socket(nullptr)
+	, Stopping(false)
+	, Thread(nullptr)
+	, WaitTime(FTimespan::FromMilliseconds(100))
 {
 	// defaults
 	DeviceEndpoint = InEndpoint;
@@ -44,7 +46,7 @@ FJSONLiveLinkSource::FJSONLiveLinkSource(FIPv4Endpoint InEndpoint)
 			.JoinedToGroup(DeviceEndpoint.Address)
 			.WithMulticastLoopback()
 			.WithMulticastTtl(2);
-					
+
 	}
 	else
 	{
@@ -111,7 +113,7 @@ void FJSONLiveLinkSource::Start()
 {
 	ThreadName = "JSON UDP Receiver ";
 	ThreadName.AppendInt(FAsyncThreadIndex::GetNext());
-	
+
 	Thread = FRunnableThread::Create(this, *ThreadName, 128 * 1024, TPri_AboveNormal, FPlatformAffinity::GetPoolThreadMask());
 }
 
@@ -123,7 +125,7 @@ void FJSONLiveLinkSource::Stop()
 uint32 FJSONLiveLinkSource::Run()
 {
 	TSharedRef<FInternetAddr> Sender = SocketSubsystem->CreateInternetAddr();
-	
+
 	while (!Stopping)
 	{
 		if (Socket->Wait(ESocketWaitConditions::WaitForRead, WaitTime))
@@ -158,28 +160,48 @@ void FJSONLiveLinkSource::HandleReceivedData(TSharedPtr<TArray<uint8>, ESPMode::
 	{
 		JsonString += TCHAR(Byte);
 	}
-	
+	// UE_LOG(LogTemp, Warning, TEXT("This is the data: %s"), *JsonString);
+
+
+
 	TSharedPtr<FJsonObject> JsonObject;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+	// UE_LOG(LogTemp, Warning, TEXT("Some warning message2"));
+
+
 	if (FJsonSerializer::Deserialize(Reader, JsonObject))
 	{
 		for (TPair<FString, TSharedPtr<FJsonValue>>& JsonField : JsonObject->Values)
 		{
+			const TSharedPtr<FJsonObject> MyJsonObject = JsonField.Value->AsObject();
+
 			FName SubjectName(*JsonField.Key);
-			const TArray<TSharedPtr<FJsonValue>>& BoneArray = JsonField.Value->AsArray();
+			const TArray<TSharedPtr<FJsonValue>>* BoneArray;
+			const TArray<TSharedPtr<FJsonValue>>* BlendShapes;
 
 			bool bCreateSubject = !EncounteredSubjects.Contains(SubjectName);
-			if (bCreateSubject)
+
+
+
+
+
+			FLiveLinkStaticDataStruct StaticDataStruct = FLiveLinkStaticDataStruct(FLiveLinkSkeletonStaticData::StaticStruct());
+			FLiveLinkSkeletonStaticData& StaticData = *StaticDataStruct.Cast<FLiveLinkSkeletonStaticData>();
+
+			FLiveLinkFrameDataStruct FrameDataStruct = FLiveLinkFrameDataStruct(FLiveLinkAnimationFrameData::StaticStruct());
+			FLiveLinkAnimationFrameData& FrameData = *FrameDataStruct.Cast<FLiveLinkAnimationFrameData>();
+
+
+			if (MyJsonObject->TryGetArrayField(TEXT("Bone"), BoneArray))
 			{
-				FLiveLinkStaticDataStruct StaticDataStruct = FLiveLinkStaticDataStruct(FLiveLinkSkeletonStaticData::StaticStruct());
-				FLiveLinkSkeletonStaticData& StaticData = *StaticDataStruct.Cast<FLiveLinkSkeletonStaticData>();
+				StaticData.BoneNames.SetNumUninitialized(BoneArray->Num());
+				StaticData.BoneParents.SetNumUninitialized(BoneArray->Num());
+				FrameData.Transforms.SetNumUninitialized(BoneArray->Num());
 
-				StaticData.BoneNames.SetNumUninitialized(BoneArray.Num());
-				StaticData.BoneParents.SetNumUninitialized(BoneArray.Num());
 
-				for (int BoneIdx=0; BoneIdx < BoneArray.Num(); ++BoneIdx)
+				for (int BoneIdx = 0; BoneIdx < BoneArray->Num(); ++BoneIdx)
 				{
-					const TSharedPtr<FJsonValue>& Bone = BoneArray[BoneIdx];
+					const TSharedPtr<FJsonValue>& Bone = (*BoneArray)[BoneIdx];
 					const TSharedPtr<FJsonObject> BoneObject = Bone->AsObject();
 
 					FString BoneName;
@@ -205,72 +227,106 @@ void FJSONLiveLinkSource::HandleReceivedData(TSharedPtr<TArray<uint8>, ESPMode::
 					}
 				}
 
-				Client->PushSubjectStaticData_AnyThread({SourceGuid, SubjectName}, ULiveLinkAnimationRole::StaticClass(), MoveTemp(StaticDataStruct));
-				EncounteredSubjects.Add(SubjectName);
+				for (int BoneIdx = 0; BoneIdx < BoneArray->Num(); ++BoneIdx)
+				{
+					const TSharedPtr<FJsonValue>& Bone = (*BoneArray)[BoneIdx];
+					const TSharedPtr<FJsonObject> BoneObject = Bone->AsObject();
+
+					const TArray<TSharedPtr<FJsonValue>>* LocationArray;
+					FVector BoneLocation;
+					if (BoneObject->TryGetArrayField(TEXT("Location"), LocationArray)
+						&& LocationArray->Num() == 3) // X, Y, Z
+					{
+						double X = (*LocationArray)[0]->AsNumber();
+						double Y = (*LocationArray)[1]->AsNumber();
+						double Z = (*LocationArray)[2]->AsNumber();
+						BoneLocation = FVector(X, Y, Z);
+					}
+					else
+					{
+						// Invalid Json Format
+						return;
+					}
+
+					const TArray<TSharedPtr<FJsonValue>>* RotationArray;
+					FQuat BoneQuat;
+					if (BoneObject->TryGetArrayField(TEXT("Rotation"), RotationArray)
+						&& RotationArray->Num() == 4) // X, Y, Z, W
+					{
+						double X = (*RotationArray)[0]->AsNumber();
+						double Y = (*RotationArray)[1]->AsNumber();
+						double Z = (*RotationArray)[2]->AsNumber();
+						double W = (*RotationArray)[3]->AsNumber();
+						BoneQuat = FQuat(X, Y, Z, W);
+					}
+					else
+					{
+						// Invalid Json Format
+						return;
+					}
+
+					const TArray<TSharedPtr<FJsonValue>>* ScaleArray;
+					FVector BoneScale;
+					if (BoneObject->TryGetArrayField(TEXT("Scale"), ScaleArray)
+						&& ScaleArray->Num() == 3) // X, Y, Z
+					{
+						double X = (*ScaleArray)[0]->AsNumber();
+						double Y = (*ScaleArray)[1]->AsNumber();
+						double Z = (*ScaleArray)[2]->AsNumber();
+						BoneScale = FVector(X, Y, Z);
+					}
+					else
+					{
+						// Invalid Json Format
+						return;
+					}
+
+					FrameData.Transforms[BoneIdx] = FTransform(BoneQuat, BoneLocation, BoneScale);
+				}
 			}
 
-			FLiveLinkFrameDataStruct FrameDataStruct = FLiveLinkFrameDataStruct(FLiveLinkAnimationFrameData::StaticStruct());
-			FLiveLinkAnimationFrameData& FrameData = *FrameDataStruct.Cast<FLiveLinkAnimationFrameData>();
-
-			FrameData.Transforms.SetNumUninitialized(BoneArray.Num());
-			for (int BoneIdx = 0; BoneIdx < BoneArray.Num(); ++BoneIdx)
+			if (MyJsonObject->TryGetArrayField(TEXT("BlendShape"), BlendShapes))
 			{
-				const TSharedPtr<FJsonValue>& Bone = BoneArray[BoneIdx];
-				const TSharedPtr<FJsonObject> BoneObject = Bone->AsObject();
 
-				const TArray<TSharedPtr<FJsonValue>>* LocationArray;
-				FVector BoneLocation;
-				if (BoneObject->TryGetArrayField(TEXT("Location"), LocationArray) 
-					&& LocationArray->Num() == 3) // X, Y, Z
-				{
-					double X = (*LocationArray)[0]->AsNumber();
-					double Y = (*LocationArray)[1]->AsNumber();
-					double Z = (*LocationArray)[2]->AsNumber();
-					BoneLocation = FVector(X, Y, Z);
-				}
-				else
-				{
-					// Invalid Json Format
-					return;
-				}
+				StaticData.PropertyNames.SetNumUninitialized(BlendShapes->Num());
+				FrameData.PropertyValues.SetNumUninitialized(BlendShapes->Num());
 
-				const TArray<TSharedPtr<FJsonValue>>* RotationArray;
-				FQuat BoneQuat;
-				if (BoneObject->TryGetArrayField(TEXT("Rotation"), RotationArray)
-					&& RotationArray->Num() == 4) // X, Y, Z, W
+				for (int i = 0; i < BlendShapes->Num(); ++i)
 				{
-					double X = (*RotationArray)[0]->AsNumber();
-					double Y = (*RotationArray)[1]->AsNumber();
-					double Z = (*RotationArray)[2]->AsNumber();
-					double W = (*RotationArray)[3]->AsNumber();
-					BoneQuat = FQuat(X, Y, Z, W);
-				}
-				else
-				{
-					// Invalid Json Format
-					return;
+					const TSharedPtr<FJsonValue>& param = (*BlendShapes)[i];
+					const TSharedPtr<FJsonObject> paramobject = param->AsObject();
+
+					FString parameterName;
+					if (paramobject->TryGetStringField(TEXT("Name"), parameterName))
+					{
+						StaticData.PropertyNames[i] = FName(*parameterName);
+					}
+					else
+					{
+						// invalid json format
+						return;
+					}
 				}
 
-				const TArray<TSharedPtr<FJsonValue>>* ScaleArray;
-				FVector BoneScale;
-				if (BoneObject->TryGetArrayField(TEXT("Scale"), ScaleArray)
-					&& ScaleArray->Num() == 3) // X, Y, Z
+				for (int i = 0; i < BlendShapes->Num(); i++)
 				{
-					double X = (*ScaleArray)[0]->AsNumber();
-					double Y = (*ScaleArray)[1]->AsNumber();
-					double Z = (*ScaleArray)[2]->AsNumber();
-					BoneScale = FVector(X, Y, Z);
+					const TSharedPtr<FJsonValue>& param = (*BlendShapes)[i];
+					const TSharedPtr<FJsonObject> paramObject = param->AsObject();
+					double value;
+					if (paramObject->TryGetNumberField(TEXT("Value"), value))
+					{
+						FrameData.PropertyValues[i] = (float)value;
+					}
+					else
+					{
+						return;
+					}
 				}
-				else
-				{
-					// Invalid Json Format
-					return;
-				}
-
-				FrameData.Transforms[BoneIdx] = FTransform(BoneQuat, BoneLocation, BoneScale);
 			}
 
-			Client->PushSubjectFrameData_AnyThread({SourceGuid, SubjectName}, MoveTemp(FrameDataStruct));
+			Client->PushSubjectStaticData_AnyThread({ SourceGuid, SubjectName }, ULiveLinkAnimationRole::StaticClass(), MoveTemp(StaticDataStruct));
+			EncounteredSubjects.Add(SubjectName);
+			Client->PushSubjectFrameData_AnyThread({ SourceGuid, SubjectName }, MoveTemp(FrameDataStruct));
 		}
 	}
 }
